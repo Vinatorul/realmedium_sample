@@ -9,7 +9,7 @@ services:
           - POSTGRES_USER=user
           - POSTGRES_PASSWORD=password
         ports:
-          - 8081:5432
+          - 5432
         volumes:
           - ./postgresql/schemas:/docker-entrypoint-initdb.d
           - ./.pgdata:/var/lib/postgresql/data
@@ -17,7 +17,7 @@ services:
           - postgres
 
     realmedium-sample:
-        image: ghcr.io/userver-framework/ubuntu-userver-build-base:v1
+        image: ghcr.io/userver-framework/ubuntu-22.04-userver-pg:latest
         privileged: true
         environment:
           - POSTGRES_DB=realmedium_db-1
@@ -43,7 +43,7 @@ services:
           - 8080:8080
         working_dir: /realmedium
         entrypoint:
-          - /tools/run_as_user.sh
+          - ./tests/run_as_user.sh
         depends_on:
           - postgres
         networks:

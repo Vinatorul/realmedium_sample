@@ -1,10 +1,10 @@
 CMAKE_COMMON_FLAGS ?= -DUSERVER_OPEN_SOURCE_BUILD=1 -DCMAKE_EXPORT_COMPILE_COMMANDS=ON
-
 CMAKE_DEBUG_FLAGS ?= -DUSERVER_SANITIZE='addr ub'
 CMAKE_RELEASE_FLAGS ?=
 CMAKE_OS_FLAGS ?= -DUSERVER_FEATURE_CRYPTOPP_BLAKE2=0 -DUSERVER_FEATURE_REDIS_HI_MALLOC=1
 NPROCS ?= $(shell nproc)
 CLANG_FORMAT ?= clang-format
+DOCKER_COMPOSE ?= docker-compose
 
 ifeq ($(KERNEL),Darwin)
 CMAKE_COMMON_FLAGS += -DUSERVER_NO_WERROR=1 -DUSERVER_CHECK_PACKAGE_VERSIONS=0 \
@@ -17,124 +17,91 @@ CMAKE_COMMON_FLAGS += -DUSERVER_NO_WERROR=1 -DUSERVER_CHECK_PACKAGE_VERSIONS=0 \
 endif
 
 
-# NOTE: use Makefile.local for customization
+# NOTE: use Makefile.local to override the options defined above.
 -include Makefile.local
 
+CMAKE_DEBUG_FLAGS += -DCMAKE_BUILD_TYPE=Debug $(CMAKE_COMMON_FLAGS)
+CMAKE_RELEASE_FLAGS += -DCMAKE_BUILD_TYPE=Release $(CMAKE_COMMON_FLAGS)
+
+.PHONY: all
 all: test-debug test-release
 
-# Debug cmake configuration
-build_debug/Makefile:
-	@git submodule update --init
-	@mkdir -p build_debug
-	@cd build_debug && \
-      cmake -DCMAKE_BUILD_TYPE=Debug $(CMAKE_COMMON_FLAGS) $(CMAKE_DEBUG_FLAGS) $(CMAKE_OS_FLAGS) $(CMAKE_OPTIONS) ..
+# Run cmake
+.PHONY: cmake-debug
+cmake-debug:
+	cmake -B build_debug $(CMAKE_DEBUG_FLAGS)
 
-# Release cmake configuration
-build_release/Makefile:
-	@git submodule update --init
-	@mkdir -p build_release
-	@cd build_release && \
-      cmake -DCMAKE_BUILD_TYPE=Release $(CMAKE_COMMON_FLAGS) $(CMAKE_RELEASE_FLAGS) $(CMAKE_OS_FLAGS) $(CMAKE_OPTIONS) ..
+.PHONY: cmake-release
+cmake-release:
+	cmake -B build_release $(CMAKE_RELEASE_FLAGS)
 
-# build using cmake
-build-impl-%: build_%/Makefile
-	@cmake --build build_$* -j $(NPROCS) --target realmedium_sample
+build_debug/CMakeCache.txt: cmake-debug
+build_release/CMakeCache.txt: cmake-release
 
-# test
-test-impl-%: build-impl-%
-	@cmake --build build_$* -j $(NPROCS) --target realmedium_sample_unittest
-	@cd build_$* && ((test -t 1 && GTEST_COLOR=1 PYTEST_ADDOPTS="--color=yes" ctest -V) || ctest -V)
-	@pep8 tests
+# Build using cmake
+.PHONY: build-debug build-release
+build-debug build-release: build-%: build_%/CMakeCache.txt
+	cmake --build build_$* -j $(NPROCS) --target realmedium_sample
 
-# testsuite service runner
-service-impl-start-%: build-impl-%
-	@cd ./build_$* && $(MAKE) start-realmedium-sample
+# Test
+.PHONY: test-debug test-release
+test-debug test-release: test-%: build-%
+	cmake --build build_$* -j $(NPROCS) --target realmedium_sample_unittest
+	cd build_$* && ((test -t 1 && GTEST_COLOR=1 PYTEST_ADDOPTS="--color=yes" ctest -V) || ctest -V)
+	pycodestyle tests
 
-# clean
-clean-impl-%:
-	cd build_$* && $(MAKE) clean
+# Start the service (via testsuite service runner)
+.PHONY: service-start-debug service-start-release
+service-start-debug service-start-release: service-start-%: build-%
+	cmake --build build_$* -v --target start-realmedium_sample
 
-# dist-clean
+# Cleanup data
+.PHONY: clean-debug clean-release
+clean-debug clean-release: clean-%:
+	cmake --build build_$* --target clean
+
 .PHONY: dist-clean
 dist-clean:
-	@rm -rf build_*
-	@rm -f ./configs/static_config.yaml
+	rm -rf build_*
+	rm -rf tests/__pycache__/
+	rm -rf tests/.pytest_cache/
 
-# format
+# Install
+.PHONY: install-debug install-release
+install-debug install-release: install-%: build-%
+	cmake --install build_$* -v --component realmedium_sample
+
+.PHONY: install
+install: install-release
+
+# Format the sources
 .PHONY: format
 format:
-	@find src -name '*pp' -type f | xargs $(CLANG_FORMAT) -i
-	@find tests -name '*.py' -type f | xargs autopep8 -i
+	find src -name '*pp' -type f | xargs $(CLANG_FORMAT) -i
+	find tests -name '*.py' -type f | xargs autopep8 -i
 
-.PHONY: cmake-debug build-debug test-debug clean-debug cmake-release build-release test-release clean-release install install-debug docker-cmake-debug docker-build-debug docker-test-debug docker-clean-debug docker-cmake-release docker-build-release docker-test-release docker-clean-release docker-install docker-install-debug docker-start-service-debug docker-start-service docker-clean-data
+# Set environment for --in-docker-start
+export DB_CONNECTION := postgresql://${POSTGRES_USER}:${POSTGRES_PASSWORD}@service-postgres:5432/${POSTGRES_DB}
 
-install-debug: build-debug
-	@cd build_debug && \
-		cmake --install . -v --component realmedium_sample
+# Internal hidden targets that are used only in docker environment
+--in-docker-start-debug --in-docker-start-release: --in-docker-start-%: install-%
+	psql ${DB_CONNECTION} -f ./postgresql/data/initial_data.sql
+	/home/user/.local/bin/realmedium_sample \
+		--config /home/user/.local/etc/realmedium_sample/static_config.yaml \
+		--config_vars /home/user/.local/etc/realmedium_sample/config_vars.docker.yaml
 
-install: build-release
-	@cd build_release && \
-		cmake --install . -v --component realmedium_sample
+# Build and run service in docker environment
+.PHONY: docker-start-service-debug docker-start-service-release
+docker-start-service-debug docker-start-service-release: docker-start-service-%:
+	$(DOCKER_COMPOSE) run -p 8080:8080 --rm realmedium-sample make -- --in-docker-start-$*
 
-# Hide target, use only in docker environment
---debug-start-in-docker: install
-	@ulimit -n 100000
-	@sed -i 's/config_vars.yaml/config_vars.docker.yaml/g' /home/user/.local/etc/realmedium_sample/static_config.yaml
-	@psql 'postgresql://user:password@service-postgres:5432/realmedium_db-1' -f ./postgresql/schemas/db-1.sql
-	@/home/user/.local/bin/realmedium_sample \
-		--config /home/user/.local/etc/realmedium_sample/static_config.yaml
-
-# Hide target, use only in docker environment
---debug-start-in-docker-debug: install-debug
-	@sed -i 's/config_vars.yaml/config_vars.docker.yaml/g' /home/user/.local/etc/realmedium_sample/static_config.yaml
-	@psql 'postgresql://user:password@service-postgres:5432/realmedium_db-1' -f ./postgresql/schemas/db-1.sql
-	@/home/user/.local/bin/realmedium_sample \
-		--config /home/user/.local/etc/realmedium_sample/static_config.yaml
-
-# Start targets makefile in docker enviroment
-docker-impl-%:
-	docker-compose run --rm realmedium-sample make $*
-
-# Build and runs service in docker environment
-docker-start-service-debug:
-	@docker-compose run -p 8080:8080 --rm realmedium-sample make -- --debug-start-in-docker-debug
-
-# Build and runs service in docker environment
-docker-start-service:
-	@docker-compose run -p 8080:8080 --rm realmedium-sample make -- --debug-start-in-docker
+# Start targets makefile in docker environment
+.PHONY: docker-cmake-debug docker-build-debug docker-test-debug docker-clean-debug docker-install-debug docker-cmake-release docker-build-release docker-test-release docker-clean-release docker-install-release
+docker-cmake-debug docker-build-debug docker-test-debug docker-clean-debug docker-install-debug docker-cmake-release docker-build-release docker-test-release docker-clean-release docker-install-release: docker-%:
+	$(DOCKER_COMPOSE) run --rm realmedium-sample make $*
 
 # Stop docker container and remove PG data
+.PHONY: docker-clean-data
 docker-clean-data:
-	@docker-compose down -v
-	@rm -rf ./.pgdata
-
-# Explicitly specifying the targets to help shell with completions
-cmake-debug: build_debug/Makefile
-cmake-release: build_release/Makefile
-
-build-debug: build-impl-debug
-build-release: build-impl-release
-
-test-debug: test-impl-debug
-test-release: test-impl-release
-
-service-start-debug: service-impl-start-debug
-service-start-release: service-impl-start-release
-
-clean-debug: clean-impl-debug
-clean-release: clean-impl-release
-
-docker-cmake-debug: docker-impl-cmake-debug
-docker-cmake-release: docker-impl-cmake-release
-
-docker-build-debug: docker-impl-build-debug
-docker-build-release: docker-impl-build-release
-
-docker-test-debug: docker-impl-test-debug
-docker-test-release: docker-impl-test-release
-
-docker-clean-debug: docker-impl-clean-debug
-docker-clean-release: docker-impl-clean-release
-
-docker-install: docker-impl-install
-docker-install-debug: docker-impl-install-debug
+	$(DOCKER_COMPOSE) down -v
+	rm -rf ./.pgdata

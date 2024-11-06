@@ -10,11 +10,11 @@ from utils import generate_title
 
 
 class User(BaseModel):
-    username: str | None = Field(default_factory=fake.user_name)
-    email: str | None = Field(default_factory=fake.email)
-    password: str | None = Field(default_factory=fake.password)
-    bio: str | None = Field(default_factory=fake.paragraph)
-    image: str | None = Field(default_factory=fake.image_url)
+    username: Optional[str] = Field(default_factory=fake.user_name)
+    email: Optional[str] = Field(default_factory=fake.email)
+    password: Optional[str] = Field(default_factory=fake.password)
+    bio: Optional[str] = Field(default_factory=fake.paragraph)
+    image: Optional[str] = Field(default_factory=fake.image_url)
 
 
 class Profile(BaseModel):
